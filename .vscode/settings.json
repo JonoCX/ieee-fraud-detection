@@ -1,0 +1,5 @@
+{
+    "python.pythonPath": "/home/jonathan/anaconda3/envs/ieee-fraud-detection/bin/python",
+    "python.linting.pylintEnabled": true,
+    "python.linting.enabled": true
+}
