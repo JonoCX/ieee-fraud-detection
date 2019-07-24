@@ -48,9 +48,8 @@ class Preprocessing:
             return data.drop(columns_for_test, axis=1)
 
         before_columns = data.columns.values
-        data = data.dropna(thresh=(0.8 * len(data)), axis=1)
-        dropped_columns = set([x for x in data.columns if x not in before_columns])
-        return data, dropped_columns
+        data = data.dropna(thresh=(0.8 * len(data)), axis=1)        
+        return data, before_columns
 
     def fillna_values(self, data):
         """
@@ -79,11 +78,11 @@ class FeatureEngineering:
 
     def _label_encode(self, data, cat_cols):
         for col in cat_cols:
-            if col in train_data.columns:
+            if col in data.columns:
                 le = LabelEncoder()
                 le.fit(list(data[data['source'] == 'train'][col].astype(str).values) + list(test_data[data['source'] == 'test'][col].astype(str).values))
-                train_data[col] = le.transform(list(data[data['source'] == 'train'][col].astype(str).values))
-                test_data[col] = le.transform(list(data[data['source'] == 'test'][col].astype(str).values))
+                data[data['source'] == 'train'][col] = le.transform(list(data[data['source'] == 'train'][col].astype(str).values))
+                data[data['source'] == 'test'][col] = le.transform(list(data[data['source'] == 'test'][col].astype(str).values))
 
         return data
 
@@ -168,9 +167,15 @@ if __name__ == '__main__':
     assert (len(cat_cols) + len(num_cols) == len(data.columns.values) - 2)
 
     print('[{0}] Handling NaN values in the training data...'.format(dt.now()))
-    data, dropped_columns = preprocessing.dropna_columns(data)
+    data, all_columns_previous = preprocessing.dropna_columns(data, None)
     data = preprocessing.fillna_values(data)
     print('[{0}] NaN values filled...'.format(dt.now()))
+
+    for col in all_columns_previous:
+        if col in cat_cols:
+            cat_cols.remove(col)
+        if col in num_cols:
+            num_cols.remove(col)
     
     epochal_date = dt(1970, 1, 1)
     print('[{0}] Processing timedelta feature, using {1} as epochal date...'.format(dt.now(), epochal_date))
@@ -198,8 +203,7 @@ if __name__ == '__main__':
         'time_month_sin', 'time_month_cos'
         ]
     )
-    num_cols.remove('V207')
-    num_cols.remove('V250')
+    
 
     # Handle cyclical data
     cyc_ts = dt.now()
@@ -208,12 +212,14 @@ if __name__ == '__main__':
     cyc_ts_end = dt.now()
     print('[{0}] Encoded cyclical data (total time: {1})...'.format(cyc_ts_end, cyc_ts_end - cyc_ts))
 
+
     # Handle numerical data
     num_ts = dt.now()
     print('[{0}] Encoding numerical data...'.format(num_ts))
     data = feature_engineering.handle_numerical(data, num_cols)
     num_ts_end = dt.now()
     print('[{0}] Encoded numerical data (total time: {1})...'.format(num_ts_end, num_ts_end - num_ts))
+
 
     # Handle categorical data
     cat_ts = dt.now()
