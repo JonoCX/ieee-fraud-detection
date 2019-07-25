@@ -3,8 +3,14 @@ import gc, calendar
 import pandas as pd
 import numpy as np 
 from datetime import datetime as dt
+from glob import glob
+
+import warnings
+warnings.filterwarnings('ignore')
 
 from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
 
 class Preprocessing:
 
@@ -36,6 +42,7 @@ class Preprocessing:
         # remove id and predictor (handle date/time values separately)
         num_cols.remove('TransactionID')
         num_cols.remove('isFraud')
+        num_cols.remove('source')
 
         return cat_cols, num_cols
 
@@ -80,7 +87,7 @@ class FeatureEngineering:
         for col in cat_cols:
             if col in data.columns:
                 le = LabelEncoder()
-                le.fit(list(data[data['source'] == 'train'][col].astype(str).values) + list(test_data[data['source'] == 'test'][col].astype(str).values))
+                le.fit(list(data[data['source'] == 'train'][col].astype(str).values) + list(data[data['source'] == 'test'][col].astype(str).values))
                 data[data['source'] == 'train'][col] = le.transform(list(data[data['source'] == 'train'][col].astype(str).values))
                 data[data['source'] == 'test'][col] = le.transform(list(data[data['source'] == 'test'][col].astype(str).values))
 
@@ -88,7 +95,7 @@ class FeatureEngineering:
 
     def _one_hot_encode(self, data, columns):
         for col in columns:
-            data = pd.concat([data, pd.get_dummies(data[col], prefix=col)], axis=1)
+            data = pd.concat([data, pd.get_dummies(data[col], prefix=col, sparse=True)], axis=1)
         return data
 
     def _time_of_day(self, hour):
@@ -100,7 +107,7 @@ class FeatureEngineering:
     def handle_categorical(self, data, cat_cols):
         # label encode, one hot encode
         data = self._label_encode(data, cat_cols)
-        data = self._one_hot_encode(data, cat_cols)
+        # data = self._one_hot_encode(data, cat_cols)
         return data
 
     def handle_numerical(self, data, num_cols):
@@ -145,6 +152,7 @@ if __name__ == '__main__':
 
     train_data['source'] = 'train'
     test_data['source'] = 'test'
+    test_data['isFraud'] = 0 # for the purposes of processing
 
     print('[{0}] Concatenating training and testing data to process together...'.format(dt.now()))
     data = pd.concat([train_data, test_data], ignore_index=True, sort=False)
@@ -164,19 +172,26 @@ if __name__ == '__main__':
     ))
 
     cat_cols, num_cols = preprocessing.get_column_types(data)
-    assert (len(cat_cols) + len(num_cols) == len(data.columns.values) - 2)
+    assert (len(cat_cols) + len(num_cols) == len(data.columns.values) - 3)
 
     print('[{0}] Handling NaN values in the training data...'.format(dt.now()))
     data, all_columns_previous = preprocessing.dropna_columns(data, None)
     data = preprocessing.fillna_values(data)
     print('[{0}] NaN values filled...'.format(dt.now()))
 
-    for col in all_columns_previous:
+    # get columns to remove from categorical and numerical sets
+    deleted_columns = [x for x in all_columns_previous if x not in data.columns.values]
+
+    # remove them
+    for col in deleted_columns:
         if col in cat_cols:
             cat_cols.remove(col)
         if col in num_cols:
             num_cols.remove(col)
-    
+
+    num_cols.remove('TransactionDT')
+
+
     epochal_date = dt(1970, 1, 1)
     print('[{0}] Processing timedelta feature, using {1} as epochal date...'.format(dt.now(), epochal_date))
     data = preprocessing.handle_timedelta(data, epochal_date)
@@ -191,20 +206,10 @@ if __name__ == '__main__':
         'time_month': 12
     }
 
-    cat_cols.update([
-        'inside_business_hours',
-        'time_of_day',
-        'weekday'
-    ])
-
-    num_cols.update([
-        'time_hour_cos', 'time_hour_sin', 'time_minute_cos', 
-        'time_minute_sin', 'time_day_cos', 'time_day_sin',
-        'time_month_sin', 'time_month_cos'
-        ]
-    )
+    cat_cols.add('inside_business_hours')
+    cat_cols.add('time_of_day')
+    cat_cols.add('weekday')
     
-
     # Handle cyclical data
     cyc_ts = dt.now()
     print('[{0}] Encoding cyclical data...'.format(cyc_ts))
@@ -212,6 +217,14 @@ if __name__ == '__main__':
     cyc_ts_end = dt.now()
     print('[{0}] Encoded cyclical data (total time: {1})...'.format(cyc_ts_end, cyc_ts_end - cyc_ts))
 
+    # drop old columns and add new ones to numerical
+    data = data.drop(cyclical_columns, axis=1)
+    num_cols.update([
+        'time_hour_cos', 'time_hour_sin', 'time_minute_cos', 
+        'time_minute_sin', 'time_day_cos', 'time_day_sin',
+        'time_month_sin', 'time_month_cos'
+        ]
+    )
 
     # Handle numerical data
     num_ts = dt.now()
@@ -228,5 +241,61 @@ if __name__ == '__main__':
     cat_ts_end = dt.now()
     print('[{0}] Encoded categorical data (total time: {1})...'.format(cat_ts_end, cat_ts_end - cat_ts))
 
-    print(data.columns.values)
+    # drop old categorical columns
+    data = data.drop(cat_cols, axis=1)
+
+    p_ts_end = dt.now()
+    print('[{0}] Completed processing and feature engineering (total time: {1})...'.format(p_ts_end, p_ts_end - start_overall))
+
+    gc.collect()
+
+    ######
+    # Modelling process
+    ######
+
+    print('[{0}] Gathering X and y features...'.format(dt.now())) # .sort_values('TransactionDT')
+
+    if glob('../data/training_features.npz'):
+        loaded_features = np.load('../data/training_features.npz')
+
+        X_train = loaded_features['X_train']
+        X_valid = loaded_features['X_valid']
+        y_train = loaded_features['y_train']
+        y_valid = loaded_features['y_valid']
+
+        del loaded_features 
+    else:
+
+        X = data.loc[data['source'] == 'train'].sort_values('TransactionDT').drop(['isFraud', 'TransactionDT', 'TransactionID', 'source', 'timestamp'], axis=1)
+        y = data.loc[data['source'] == 'train'].sort_values('TransactionDT')['isFraud']
+
+        print('[{0}] Splitting data into training and validation datasets...'.format(dt.now()))
+        X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.25, random_state=42, stratify=y)
+        print('[{0}] Data Split... (X_train size: {1}, X_valid size: {2})'.format(dt.now(), len(X_train), len(X_valid)))
+
+        X_test = data[data['source'] == 'test'].sort_values('TransactionDT').drop(['TransactionDT', 'TransactionID', 'isFraud', 'source', 'timestamp'], axis=1)
+        test_dt_id = data[data['source'] == 'test'][['TransactionDT', 'TransactionID']]
+
+        del data  
+
+    class_weight = np.sum(y == 1) / float(np.sum(y == 0))
+    print('[{0}] Class weight hyperparameter: {1}'.format(dt.now(), class_weight))
+
+    xgb_model = xgb.XGBClassifier(
+        metric = 'auc',
+        learning_rate = 0.03,
+        subsample=0.9,
+        max_depth=10,
+        objective='binary:logistic',
+        scale_pos_weight=class_weight,
+        random_state=42
+    )
+    xgb_model.fit(X_train, y_train, eval_set=[(X_train, y_train), (X_valid, y_valid)], eval_metric='auc')
+    y_preds = xgb_model.predict_proba(X_test)
+
+    sub = test_dt_id['TransactionID']
+    sub['isFraud'] = y_preds
+    print(sub.head())
     
+    sub.to_csv('../data/submission.csv', index=False)
+
